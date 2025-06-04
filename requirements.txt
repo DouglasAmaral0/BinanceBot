@@ -1,0 +1,7 @@
+python-binance
+pandas
+numpy
+requests
+praw
+tweepy
+openai
