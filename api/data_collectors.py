@@ -4,6 +4,8 @@ Coletores de dados de fontes externas (Reddit, Twitter, News APIs)
 import praw
 import tweepy
 import requests
+from requests.exceptions import RequestException
+from prawcore.exceptions import PrawcoreException
 from datetime import datetime
 import json
 
@@ -32,19 +34,22 @@ def init_collectors():
     # Verificar conexão com Reddit
     try:
         subreddit = reddit.subreddit("CryptoCurrency")
+        _ = subreddit.subscribers
         log_info(f"Reddit API inicializada com sucesso. Subscribers: {subreddit.subscribers}")
+    except PrawcoreException as e:
+        log_error(f"Falha ao conectar ao Reddit: {e}")
     except Exception as e:
-        log_error(f"Falha ao inicializar Reddit API: {e}")
+        log_error(f"Erro ao inicializar Reddit API: {e}")
     
     # Verificar News API
     try:
         url = f"https://newsapi.org/v2/everything?q=crypto&pageSize=1&apiKey={config.NEWS_API_KEY}"
-        response = requests.get(url)
+        response = requests.get(url, timeout=10)
         if response.status_code == 200:
             log_info("News API inicializada com sucesso")
         else:
             log_error(f"Falha ao inicializar News API. Status code: {response.status_code}")
-    except Exception as e:
+    except RequestException as e:
         log_error(f"Erro ao verificar News API: {e}")
     
     # Verificar Twitter API
@@ -82,7 +87,6 @@ def get_reddit_data(coin, limit=20):
         for subreddit_name in subreddits:
             try:
                 subreddit = reddit.subreddit(subreddit_name)
-                # Busca por posts contendo o nome da moeda ou seu símbolo completo
                 search_queries = [coin]
                 
                 # Se o nome for curto, adicione nomes completos
@@ -103,26 +107,35 @@ def get_reddit_data(coin, limit=20):
                         search_queries.append(common_names[coin])
                 
                 for query in search_queries:
-                    search_results = subreddit.search(query, limit=limit, time_filter='week')
-                    
-                    for post in search_results:
-                        if post.selftext:
-                            # Limita o tamanho do texto para evitar custos excessivos do LLM
-                            truncated_text = post.selftext[:1000] if len(post.selftext) > 1000 else post.selftext
-                            all_posts.append({
-                                'title': post.title,
-                                'text': truncated_text,
-                                'score': post.score,
-                                'created_utc': post.created_utc,
-                                'url': post.url,
-                                'subreddit': subreddit_name
-                            })
-            except Exception as e:
+                    try:
+                        search_results = subreddit.search(query, limit=limit, time_filter='week')
+
+                        for post in search_results:
+                            if post.selftext:
+                                truncated_text = post.selftext[:1000] if len(post.selftext) > 1000 else post.selftext
+                                all_posts.append({
+                                    'title': post.title,
+                                    'text': truncated_text,
+                                    'score': post.score,
+                                    'created_utc': post.created_utc,
+                                    'url': post.url,
+                                    'subreddit': subreddit_name
+                                })
+                    except PrawcoreException as pe:
+                        log_error(f"Erro de conexão ao buscar '{query}' em {subreddit_name}: {pe}")
+                        continue
+            except PrawcoreException as e:
                 log_error(f"Erro ao acessar subreddit {subreddit_name}: {e}")
+                continue
+            except Exception as e:
+                log_error(f"Falha inesperada em subreddit {subreddit_name}: {e}")
                 continue
                 
         log_info(f"Obtidos {len(all_posts)} posts do Reddit para {coin}")
         return all_posts
+    except PrawcoreException as e:
+        log_error(f"Erro de conexão com Reddit para {coin}: {e}")
+        return []
     except Exception as e:
         log_error(f"Erro ao coletar dados do Reddit para {coin}: {e}")
         return []
@@ -215,7 +228,7 @@ def get_crypto_news(coin, limit=5):
         # Use News API
         url = f"https://newsapi.org/v2/everything?q={search_term} crypto&sortBy=publishedAt&pageSize={limit}&apiKey={config.NEWS_API_KEY}"
         
-        response = requests.get(url)
+        response = requests.get(url, timeout=10)
         data = response.json()
         
         articles = []
@@ -231,6 +244,9 @@ def get_crypto_news(coin, limit=5):
         
         log_info(f"Obtidas {len(articles)} notícias para {coin}")
         return articles
+    except RequestException as e:
+        log_error(f"Erro de requisição ao coletar notícias para {coin}: {e}")
+        return []
     except Exception as e:
         log_error(f"Erro ao coletar notícias para {coin}: {e}")
         return []

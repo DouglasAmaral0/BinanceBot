@@ -2,6 +2,7 @@
 Cliente da API da Binance para o bot de trading
 """
 from binance.client import Client
+from binance.exceptions import BinanceAPIException, BinanceRequestException
 import pandas as pd
 import numpy as np
 import time
@@ -32,11 +33,36 @@ def initialize_client():
     return client
 
 
+def ensure_binance_connection():
+    """Garante que o cliente Binance está conectado. Tenta reconectar se necessário."""
+    global client
+    try:
+        if client is None:
+            log_warning("Cliente Binance não inicializado. Tentando inicializar...")
+            initialize_client()
+        else:
+            client.ping()
+        return True
+    except Exception as e:
+        log_error(f"Conexão com Binance perdida: {e}")
+        log_info("Tentando reconectar à Binance...")
+        try:
+            initialize_client()
+            return True
+        except Exception as recon_e:
+            log_error(f"Falha ao reconectar à Binance: {recon_e}")
+            return False
+
+
 def get_all_binance_coins():
     """
     Retorna uma lista de todas as moedas disponíveis na Binance que possuem par com USDT
     e têm volume suficiente para trading.
     """
+    if not ensure_binance_connection():
+        # Retorna lista padrão se não conseguir conectar
+        default_coins = ['BTC', 'ETH', 'BNB', 'SOL', 'XRP', 'ADA', 'DOGE', 'SHIB', 'DOT', 'AVAX']
+        return default_coins
     try:
         # Obter informações de preço para todos os pares
         tickers = client.get_ticker()
@@ -83,6 +109,8 @@ def get_historical_data(coin_pair, interval=Client.KLINE_INTERVAL_1HOUR, lookbac
     Returns:
         pd.DataFrame: DataFrame com dados históricos
     """
+    if not ensure_binance_connection():
+        return pd.DataFrame()
     try:
         klines = client.get_historical_klines(coin_pair, interval, lookback)
         
@@ -124,6 +152,8 @@ def get_trade_rules(coin_pair):
     Retorna as regras relacionadas a LOT_SIZE (quantidade mínima, stepSize como string)
     e NOTIONAL (valor mínimo da ordem) para o par de moedas.
     """
+    if not ensure_binance_connection():
+        return None, None
     try:
         info = client.get_symbol_info(coin_pair)
     except Exception as e:
@@ -176,6 +206,8 @@ def _adjust_quantity_to_step_size(quantity, step_size_str):
 
 def get_current_price(symbol):
     """Obtém o preço atual de um símbolo"""
+    if not ensure_binance_connection():
+        return None
     try:
         ticker = client.get_symbol_ticker(symbol=symbol)
         return float(ticker['price'])
@@ -186,6 +218,8 @@ def get_current_price(symbol):
 
 def get_account_balance():
     """Retorna o saldo da conta em todas as moedas"""
+    if not ensure_binance_connection():
+        return []
     try:
         return client.get_account()['balances']
     except Exception as e:
@@ -195,6 +229,8 @@ def get_account_balance():
 
 def get_balance(coin):
     """Retorna o saldo livre (free) de uma determinada moeda."""
+    if not ensure_binance_connection():
+        return 0.0
     try:
         balance_info = client.get_asset_balance(asset=coin)
         if balance_info is None or 'free' not in balance_info:
@@ -258,6 +294,8 @@ def buy_coin(coin_pair, available_usdt_to_spend):
     respeitando LOT_SIZE e MIN_NOTIONAL.
     Retorna o objeto da ordem da Binance com informações de 'fills'.
     """
+    if not ensure_binance_connection():
+        return None
     log_info(f"\nTentando comprar {coin_pair} com aproximadamente {available_usdt_to_spend:.2f} USDT.")
     
     current_price = get_current_price(coin_pair)
@@ -329,9 +367,11 @@ def buy_coin(coin_pair, available_usdt_to_spend):
         # Este cálculo será feito em strategy/trading.py onde a ordem é recebida
         return order # Retorna o objeto da ordem completo
         
+    except (BinanceAPIException, BinanceRequestException) as e:
+        log_error(f"Erro da API Binance ao comprar {coin_pair}: {e}")
+        return None
     except Exception as e:
         log_error(f"Erro ao colocar ordem de compra para {coin_pair} (Qtd: {coin_quantity_adjusted}): {e}")
-        # Tentar logar informações adicionais se for um erro da API da Binance
         if hasattr(e, 'code') and hasattr(e, 'message'):
             log_error(f"Binance API Error Code: {e.code}, Message: {e.message}")
         return None
@@ -343,7 +383,10 @@ def sell_coin(coin_pair, quantity_to_sell):
     respeitando LOT_SIZE e MIN_NOTIONAL.
     """
     global last_sold_coin, last_trade_time
-    
+
+    if not ensure_binance_connection():
+        return None
+
     log_info(f"\nTentando vender {quantity_to_sell:.8f} de {coin_pair}.")
     
     current_price = get_current_price(coin_pair)
@@ -399,6 +442,9 @@ def sell_coin(coin_pair, quantity_to_sell):
         # Este cálculo será feito em strategy/trading.py onde a ordem é recebida
         return order # Retorna o objeto da ordem completo
 
+    except (BinanceAPIException, BinanceRequestException) as e:
+        log_error(f"Erro da API Binance ao vender {coin_pair}: {e}")
+        return None
     except Exception as e:
         log_error(f"Erro ao colocar ordem de venda para {coin_pair} (Qtd: {coin_quantity_adjusted}): {e}")
         if hasattr(e, 'code') and hasattr(e, 'message'):
@@ -411,6 +457,9 @@ def sell_all_coins():
     Vende todo o saldo livre das moedas na carteira que tenham par com USDT e valor suficiente.
     Retorna o total de USDT obtido (bruto, antes de taxas da operação de venda).
     """
+    if not ensure_binance_connection():
+        return 0.0
+
     usdt_obtained_gross = 0
     sold_any = False
 
