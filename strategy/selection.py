@@ -8,7 +8,12 @@ from config import config
 from utils.helpers import log_info, log_error
 from api.binance_client import get_all_binance_coins, last_sold_coin, last_trade_time
 from api.data_collectors import collect_all_data_for_coin
-from analysis.technical import calculate_rsi_for_coin, calculate_volatility_for_coin
+from analysis.technical import (
+    calculate_rsi_for_coin,
+    calculate_volatility_for_coin,
+    calculate_ma_for_coin,
+    calculate_macd_for_coin,
+)
 from analysis.sentiment import analyze_sentiment_with_llm, get_combined_sentiment_score
 
 
@@ -37,18 +42,42 @@ def filter_by_rsi(coin_pair, max_rsi=50):
     vol = calculate_volatility_for_coin(coin_pair)
     if vol is None:
         return None
-        
+
+    # Médias móveis e MACD para complementar o filtro
+    sma_50 = calculate_ma_for_coin(coin_pair, period=50)
+    sma_200 = calculate_ma_for_coin(coin_pair, period=200)
+    macd_line, macd_signal, _ = calculate_macd_for_coin(coin_pair)
+
     # Cálculo do score técnico preliminar
     tech_score = (max_rsi - rsi) + (vol * 1000)
+    trend_bonus = 0
+    if sma_50 and sma_200:
+        if sma_50 > sma_200:
+            trend_bonus += 10
+        else:
+            trend_bonus -= 10
+    if macd_line and macd_signal:
+        if macd_line > macd_signal:
+            trend_bonus += 5
+        else:
+            trend_bonus -= 5
+    tech_score += trend_bonus
     tech_data = {
         'pair': coin_pair,
         'coin': coin_pair.replace('USDT', ''),
         'rsi': rsi,
         'volatility': vol,
+        'sma_50': sma_50,
+        'sma_200': sma_200,
+        'macd': macd_line,
         'tech_score': tech_score
     }
     
-    log_info(f"{coin_pair}: RSI={rsi:.2f}, Vol={vol*100:.2f}%, Tech Score={tech_score:.2f}")
+    log_info(
+        f"{coin_pair}: RSI={rsi:.2f}, Vol={vol*100:.2f}%, SMA50={sma_50:.4f if sma_50 else 'n/a'}, "
+        f"SMA200={sma_200:.4f if sma_200 else 'n/a'}, MACD={macd_line:.4f if macd_line else 'n/a'}, "
+        f"Tech Score={tech_score:.2f}"
+    )
     return tech_data
 
 

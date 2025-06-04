@@ -22,6 +22,10 @@ class Config:
     COOLDOWN_TIME: int = 3600  # segundos
     MIN_USDT_FOR_TRADE: float = 10.0
     PERCENT_USDT_TO_INVEST_PER_TRADE: float = 0.95
+    # Percentual do valor total do portfólio utilizado em cada operação
+    PERCENT_PORTFOLIO_PER_TRADE: float = 0.10
+    # Perda máxima permitida por dia em USDT antes de pausar as operações
+    MAX_DAILY_LOSS_USDT: float = 50.0
     MAX_COINS_TO_ANALYZE: int = 20
 
     # Configurações de LLM

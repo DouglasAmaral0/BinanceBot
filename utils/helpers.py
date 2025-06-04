@@ -44,6 +44,12 @@ def log_trade(action, symbol, quantity, price, total_value, fees_paid=0.0, net_v
         print(f"[{timestamp}] [TRADE] {action} {quantity} {symbol} @ {price} = {total_value:.2f} USDT")
 
 
+def log_performance(label, value):
+    """Loga métricas de performance como lucro ou perda acumulada"""
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    print(f"[{timestamp}] [PERF] {label}: {value:.2f} USDT")
+
+
 def format_percentage(value, precision=2):
     """
     Formata um valor como percentagem
