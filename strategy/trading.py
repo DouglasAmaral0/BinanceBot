@@ -2,7 +2,14 @@
 Implementação das estratégias e lógica de trading
 """
 from config import config
-from utils.helpers import log_info, log_error, log_trade, log_warning # Adicionado log_warning e log_trade atualizado
+from utils.helpers import (
+    log_info,
+    log_error,
+    log_trade,
+    log_warning,
+    log_performance,
+)
+from datetime import datetime
 from api.binance_client import get_current_price, get_balance, buy_coin, sell_all_coins, get_portfolio_value # Adicionado get_portfolio_value
 from analysis.technical import dynamic_stop_loss_take_profit
 from strategy.selection import choose_best_coin
@@ -19,6 +26,10 @@ take_profit_pct = config.DEFAULT_TAKE_PROFIT_PCT
 
 # Para rastreamento de P&L do ciclo de trade
 usdt_balance_before_trade = 0.0
+
+# Controle de performance diária
+daily_profit_loss = 0.0
+current_day = datetime.utcnow().date()
 
 
 def _calculate_order_details(order_response, default_fee_percent=config.BINANCE_FEE_PERCENT):
@@ -72,6 +83,35 @@ def _calculate_order_details(order_response, default_fee_percent=config.BINANCE_
 
     log_error("Não foi possível determinar detalhes da execução da ordem (sem 'fills' ou dados agregados).")
     return 0, 0, 0, 0
+
+
+def reset_daily_performance():
+    """Reseta o acompanhamento de lucro/prejuízo diário"""
+    global daily_profit_loss, current_day
+    daily_profit_loss = 0.0
+    current_day = datetime.utcnow().date()
+    log_info("Performance diária reiniciada")
+
+
+def update_daily_profit(amount):
+    """Atualiza o acumulado diário e loga"""
+    global daily_profit_loss
+    daily_profit_loss += amount
+    log_performance("Lucro/Prejuízo do dia", daily_profit_loss)
+
+
+def check_daily_loss_limit():
+    """Verifica se o limite de perda diária foi atingido"""
+    global current_day
+    today = datetime.utcnow().date()
+    if today != current_day:
+        reset_daily_performance()
+    if daily_profit_loss <= -config.MAX_DAILY_LOSS_USDT:
+        log_warning(
+            f"Limite diário de perda atingido ({daily_profit_loss:.2f} USDT). Operações serão pausadas."
+        )
+        return True
+    return False
 
 
 def check_stop_loss_and_take_profit(coin_pair_to_check):
@@ -149,9 +189,13 @@ def initialize_trade(coin_pair_to_buy):
         log_error(f"Saldo USDT ({usdt_balance:.2f}) insuficiente. Mínimo necessário: {config.MIN_USDT_FOR_TRADE} USDT")
         return False
     
-    usdt_to_invest = usdt_balance * config.PERCENT_USDT_TO_INVEST_PER_TRADE # Ex: 0.95 para investir 95% do saldo
-    if usdt_to_invest < config.MIN_USDT_FOR_TRADE: # Checagem dupla
-        log_error(f"Valor a investir ({usdt_to_invest:.2f}) é menor que o mínimo de {config.MIN_USDT_FOR_TRADE} USDT.")
+    portfolio_value = get_portfolio_value()
+    usdt_to_invest = portfolio_value * config.PERCENT_PORTFOLIO_PER_TRADE
+    usdt_to_invest = min(usdt_to_invest, usdt_balance)
+    if usdt_to_invest < config.MIN_USDT_FOR_TRADE:
+        log_error(
+            f"Valor a investir ({usdt_to_invest:.2f}) é menor que o mínimo de {config.MIN_USDT_FOR_TRADE} USDT."
+        )
         return False
 
     usdt_balance_before_trade = get_balance('USDT') # Registra saldo USDT ANTES da compra
@@ -196,6 +240,9 @@ def execute_strategy():
     """
     global current_coin, current_coin_base_asset, current_coin_purchase_price, current_coin_quantity_bought, current_coin_total_cost_usdt
     global usdt_balance_before_trade
+
+    if check_daily_loss_limit():
+        return False
     
     action_taken = False
 
@@ -261,6 +308,7 @@ def execute_strategy():
                     log_info(f"Saldo USDT (Antes da Compra): {usdt_balance_before_trade:.2f} USDT")
                     log_info(f"Saldo USDT (Após a Venda): {usdt_balance_after_trade:.2f} USDT")
                     log_info(f"Lucro/Prejuízo (Variação Saldo USDT): {profit_or_loss_usdt_balance:.2f} USDT")
+                    update_daily_profit(profit_or_loss_usdt_balance)
                     log_info(f"--- FIM DO RESULTADO DO TRADE ---\n")
 
                     # Resetar estado para a próxima trade

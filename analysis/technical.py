@@ -78,6 +78,67 @@ def calculate_rsi_for_coin(coin_pair, period=14):
         return None
 
 
+def calculate_sma(data, period=20, column='close'):
+    """Calcula a média móvel simples (SMA)"""
+    try:
+        if len(data) < period:
+            log_error(f"Dados insuficientes para calcular SMA{period}.")
+            return None
+        return data[column].rolling(window=period).mean().iloc[-1]
+    except Exception as e:
+        log_error(f"Erro ao calcular SMA: {e}")
+        return None
+
+
+def calculate_ema(data, period=20, column='close'):
+    """Calcula a média móvel exponencial (EMA)"""
+    try:
+        if len(data) < period:
+            log_error(f"Dados insuficientes para calcular EMA{period}.")
+            return None
+        return data[column].ewm(span=period, adjust=False).mean().iloc[-1]
+    except Exception as e:
+        log_error(f"Erro ao calcular EMA: {e}")
+        return None
+
+
+def calculate_macd(data, slow=26, fast=12, signal=9, column='close'):
+    """Calcula valores de MACD (linha MACD, linha sinal e histograma)"""
+    try:
+        if len(data) < slow + signal:
+            log_error("Dados insuficientes para calcular MACD.")
+            return None, None, None
+        ema_fast = data[column].ewm(span=fast, adjust=False).mean()
+        ema_slow = data[column].ewm(span=slow, adjust=False).mean()
+        macd_line = ema_fast - ema_slow
+        signal_line = macd_line.ewm(span=signal, adjust=False).mean()
+        histogram = macd_line - signal_line
+        return macd_line.iloc[-1], signal_line.iloc[-1], histogram.iloc[-1]
+    except Exception as e:
+        log_error(f"Erro ao calcular MACD: {e}")
+        return None, None, None
+
+
+def calculate_ma_for_coin(coin_pair, period=20, ma_type='sma'):
+    """Calcula média móvel simples ou exponencial para um par"""
+    df = get_historical_data(coin_pair)
+    if df.empty:
+        log_error(f"Sem dados históricos para {coin_pair}")
+        return None
+    if ma_type == 'ema':
+        return calculate_ema(df, period)
+    return calculate_sma(df, period)
+
+
+def calculate_macd_for_coin(coin_pair, slow=26, fast=12, signal=9):
+    """Calcula o MACD para um par de moedas"""
+    df = get_historical_data(coin_pair)
+    if df.empty:
+        log_error(f"Sem dados históricos para {coin_pair}")
+        return None, None, None
+    return calculate_macd(df, slow, fast, signal)
+
+
 def calculate_volatility(data, window=23, column='close'):
     """
     Calcula a volatilidade como desvio padrão dos retornos percentuais.
