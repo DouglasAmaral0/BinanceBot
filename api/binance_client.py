@@ -75,11 +75,12 @@ def get_all_binance_coins():
         usdt_pairs = []
         for ticker in tickers:
             symbol = ticker['symbol']
-            if symbol.endswith('USDT') and \
-               not symbol.endswith('UPUSDT') and \
-               not symbol.endswith('DOWNUSDT') and \
-               not "BEAR" in symbol and \
-               not "BULL" in symbol: # Filtros adicionais
+            base_symbol = symbol.replace('USDT', '')
+            if base_symbol in config.EXCLUDED_SYMBOLS:
+                continue
+            if any(suffix in symbol for suffix in config.EXCLUDED_SUFFIXES):
+                continue
+            if symbol.endswith('USDT'):
                 try:
                     volume_24h = float(ticker['quoteVolume'])  # Volume em USDT
                     if volume_24h > config.MIN_VOLUME_FILTER:
@@ -90,6 +91,15 @@ def get_all_binance_coins():
                     continue
         
         log_info(f"Total de moedas negociáveis (pares USDT com volume > {config.MIN_VOLUME_FILTER}) na Binance: {len(usdt_pairs)}")
+        if config.PREFERRED_COINS:
+            prioritized = []
+            for coin in config.PREFERRED_COINS:
+                if coin in usdt_pairs:
+                    prioritized.append(coin)
+            others = [c for c in usdt_pairs if c not in prioritized]
+            usdt_pairs = prioritized + others
+            log_info(f"Priorizando {len(prioritized)} moedas da whitelist")
+            return usdt_pairs
         if not usdt_pairs:
             log_warning("Nenhuma moeda encontrada que satisfaça os critérios de filtro. Verifique MIN_VOLUME_FILTER.")
         return usdt_pairs

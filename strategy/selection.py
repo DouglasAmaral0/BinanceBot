@@ -12,7 +12,8 @@ from analysis.technical import (
     calculate_volatility_for_coin,
     calculate_ma_for_coin,
     calculate_macd_for_coin,
-    calculate_bollinger_bands   # NOVO
+    calculate_bollinger_bands,
+    check_higher_timeframe_trend
 )
 from analysis.sentiment import analyze_sentiment_with_llm, get_combined_sentiment_score
 
@@ -146,7 +147,26 @@ def filter_by_rsi_enhanced(coin_pair, rsi_buy_threshold=35, rsi_oversold=30):
         f"Score Final={tech_score:.2f}"
     )
     
+    macd_histogram = tech_data.get('macd', 0) - tech_data.get('macd_signal', 0) if tech_data.get('macd') and tech_data.get('macd_signal') else None
+    bb_data_dict = {'position': tech_data.get('bb_position')} if tech_data.get('bb_position') else None
+
+    if not require_multiple_signals(coin_pair, rsi, volume_analysis, macd_histogram, bb_data_dict):
+        log_info(f"{coin_pair}: Não passou na verificação de múltiplos sinais")
+        return None
+    higher_trend = check_higher_timeframe_trend(coin_pair, timeframe='4h')
+    if higher_trend == 'bearish':
+        log_info(f"{coin_pair}: Tendência maior é BEARISH, pulando")
+        return None
+    elif higher_trend == 'neutral':
+        log_info(f"{coin_pair}: Tendência maior NEUTRA - cuidado extra necessário")
+        # Não bloqueia, mas reduz score
+        tech_score *= 0.8
+    # Se passar, adiciona bonus para tendência bullish
+    if higher_trend == 'bullish':
+        tech_score += 15
+        log_info(f"{coin_pair}: ✓ Tendência maior BULLISH - bonus aplicado")
     return tech_data
+    
 
 
 # === NOVO: Sistema de Scoring Multicritério ===
@@ -380,6 +400,63 @@ def analyze_sentiment_for_candidates(candidates, max_workers=5):
                 log_error(f"Erro ao processar {candidate['pair']}: {e}")
     
     return results
+
+
+def require_multiple_signals(coin_pair, rsi, volume_analysis, macd_histogram, bb_data):
+    """
+    Exige múltiplos sinais técnicos para confirmar entrada.
+    Retorna True apenas se pelo menos 3 de 5 sinais forem positivos.
+    """
+    signals_positive = 0
+    signals_checked = 0
+    
+    # Sinal 1: RSI em oversold
+    if rsi is not None:
+        signals_checked += 1
+        if rsi < 35:
+            signals_positive += 1
+            log_info(f"{coin_pair}: ✓ RSI oversold ({rsi:.1f})")
+        else:
+            log_info(f"{coin_pair}: ✗ RSI não oversold ({rsi:.1f})")
+    
+    # Sinal 2: Volume acima da média
+    if volume_analysis:
+        signals_checked += 1
+        volume_signal = volume_analysis.get('volume_signal', 'NEUTRO')
+        if volume_signal in ['FORTE_COMPRA', 'COMPRA']:
+            signals_positive += 1
+            log_info(f"{coin_pair}: ✓ Volume forte")
+        else:
+            log_info(f"{coin_pair}: ✗ Volume fraco")
+    
+    # Sinal 3: MACD positivo ou virando
+    if macd_histogram is not None:
+        signals_checked += 1
+        if macd_histogram > 0:
+            signals_positive += 1
+            log_info(f"{coin_pair}: ✓ MACD positivo")
+        else:
+            log_info(f"{coin_pair}: ✗ MACD negativo")
+    
+    # Sinal 4: Próximo da Bollinger Band inferior
+    if bb_data:
+        signals_checked += 1
+        bb_position = bb_data.get('position', 0.5)
+        if bb_position < 0.3:
+            signals_positive += 1
+            log_info(f"{coin_pair}: ✓ Próximo BB inferior")
+        else:
+            log_info(f"{coin_pair}: ✗ Não próximo BB inferior")
+    
+    # Sinal 5: Tendência de timeframe maior (adicionar depois)
+    # Por enquanto, assume neutro
+    
+    required_signals = config.MIN_SIGNALS_REQUIRED
+    passed = signals_positive >= required_signals
+    
+    log_info(f"{coin_pair}: {signals_positive}/{signals_checked} sinais positivos (mínimo {required_signals})")
+    
+    return passed
 
 
 def choose_best_coin():

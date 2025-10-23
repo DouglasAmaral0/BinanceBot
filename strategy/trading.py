@@ -25,6 +25,9 @@ current_coin_quantity_bought = 0.0 # Quantidade REAL comprada
 current_coin_total_cost_usdt = 0.0 # Custo total em USDT incluindo taxas da compra
 position_open_time = None          # Timestamp de quando a posição foi aberta
 highest_price_reached = 0.0 
+trades_today = 0
+last_trade_date = None
+last_trade_timestamp = 0
 
 stop_loss_pct = config.DEFAULT_STOP_LOSS_PCT
 take_profit_pct = config.DEFAULT_TAKE_PROFIT_PCT
@@ -35,6 +38,37 @@ usdt_balance_before_trade = 0.0
 # Controle de performance diária
 daily_profit_loss = 0.0
 current_day = datetime.utcnow().date()
+
+def can_open_new_trade():
+    """
+    Verifica se é permitido abrir um novo trade baseado em:
+    1. Limite de trades por dia
+    2. Tempo mínimo entre trades
+    """
+    global trades_today, last_trade_date, last_trade_timestamp
+    
+    current_time = time.time()
+    today = datetime.now().date()
+    
+    # Reset contador se mudou o dia
+    if last_trade_date != today:
+        trades_today = 0
+        last_trade_date = today
+        log_info(f"Novo dia: contador de trades resetado")
+    
+    # Verifica limite diário
+    if trades_today >= config.MAX_TRADES_PER_DAY:
+        log_warning(f"Limite diário de {config.MAX_TRADES_PER_DAY} trades atingido")
+        return False
+    
+    # Verifica tempo mínimo entre trades
+    time_since_last = current_time - last_trade_timestamp
+    if last_trade_timestamp > 0 and time_since_last < config.MIN_TIME_BETWEEN_TRADES:
+        remaining = (config.MIN_TIME_BETWEEN_TRADES - time_since_last) / 3600
+        log_info(f"Tempo mínimo entre trades não atingido. Aguarde {remaining:.1f}h")
+        return False
+    
+    return True
 
 def save_bot_state():
     """
@@ -362,6 +396,10 @@ def initialize_trade_with_timeout(coin_pair_to_buy):
     Versão modificada de initialize_trade que registra o tempo de abertura.
     """
     global position_open_time, highest_price_reached
+    
+    if not can_open_new_trade():
+        log_info("Não é permitido abrir novo trade no momento")
+        return False
     
     # Chama a função original (você pode integrar diretamente)
     result = initialize_trade(coin_pair_to_buy)

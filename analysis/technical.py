@@ -8,6 +8,7 @@ from utils.helpers import log_info, log_error
 from api.binance_client import get_historical_data
 
 
+
 def calculate_rsi(data, period=14, column='close'):
     """
     Calcula o RSI para os dados fornecidos.
@@ -204,34 +205,72 @@ def calculate_volatility_for_coin(coin_pair, window=23):
 
 def dynamic_stop_loss_take_profit(coin_pair, base_stop_loss=0.05, base_take_profit=0.10):
     """
-    Ajusta stop_loss e take_profit dinamicamente de acordo com a volatilidade.
-    
-    Args:
-        coin_pair: Par de moedas (ex: 'BTCUSDT')
-        base_stop_loss: Valor base para stop loss (padrão: 0.05 ou 5%)
-        base_take_profit: Valor base para take profit (padrão: 0.10 ou 10%)
-        
-    Returns:
-        tuple: (stop_loss, take_profit) - valores ajustados ou valores base em caso de erro
+    Ajusta stop_loss e take_profit dinamicamente usando ATR.
+    VERSÃO MELHORADA.
     """
-    # Obter volatilidade
-    volatility = calculate_volatility_for_coin(coin_pair, window=24)  # 24 períodos (horas)
+    # Usa ATR para stop loss mais inteligente
+    stop_loss = dynamic_stop_loss_atr_based(coin_pair, atr_multiplier=2.0)
     
-    if volatility is None:
-        log_info(f"Usando valores base para stop loss e take profit para {coin_pair}")
-        return base_stop_loss, base_take_profit
+    # Take profit baseado no stop loss (risk:reward de 1:2)
+    take_profit = stop_loss * 2.0
     
-    # Ajustar os valores com base na volatilidade
-    # Exemplo: se volatilidade=0.02 (2%), multiplicamos por 2.5 e 5.0
-    new_stop_loss = max(base_stop_loss, 2.5 * volatility)
-    new_take_profit = max(base_take_profit, 5.0 * volatility)
+    # Garante que take profit seja pelo menos 12% para cobrir taxas
+    take_profit = max(0.12, take_profit)
     
     log_info(f"Ajuste dinâmico para {coin_pair}:")
-    log_info(f"Volatilidade: {volatility*100:.2f}%")
-    log_info(f"Stop Loss: {base_stop_loss*100:.2f}% → {new_stop_loss*100:.2f}%")
-    log_info(f"Take Profit: {base_take_profit*100:.2f}% → {new_take_profit*100:.2f}%")
+    log_info(f"Stop Loss: {stop_loss*100:.2f}%")
+    log_info(f"Take Profit: {take_profit*100:.2f}% (Risk:Reward = 1:2)")
     
-    return new_stop_loss, new_take_profit
+    return stop_loss, take_profit
+
+def check_higher_timeframe_trend(coin_pair, timeframe='4h'):
+    """
+    Verifica a tendência em um timeframe maior.
+    Só devemos comprar se a tendência maior for bullish.
+    
+    Args:
+        coin_pair: Par de moedas
+        timeframe: '4h' ou '1d'
+    
+    Returns:
+        str: 'bullish', 'bearish', 'neutral'
+    """
+    try:
+        # Busca dados do timeframe maior
+        if timeframe == '4h':
+            df = get_historical_data(coin_pair, interval='4h', lookback='7 days ago UTC')
+            sma_short_period = 20
+            sma_long_period = 50
+        else:  # 1d
+            df = get_historical_data(coin_pair, interval='1d', lookback='60 days ago UTC')
+            sma_short_period = 10
+            sma_long_period = 30
+        
+        if df.empty or len(df) < sma_long_period:
+            log_warning(f"Dados insuficientes para tendência maior de {coin_pair}")
+            return 'neutral'
+        
+        # Calcula SMAs
+        sma_short = df['close'].rolling(sma_short_period).mean().iloc[-1]
+        sma_long = df['close'].rolling(sma_long_period).mean().iloc[-1]
+        current_price = df['close'].iloc[-1]
+        
+        # Classifica tendência
+        if current_price > sma_short > sma_long:
+            trend = 'bullish'
+            log_info(f"{coin_pair} ({timeframe}): Tendência BULLISH - Preço > SMA{sma_short_period} > SMA{sma_long_period}")
+        elif current_price < sma_short < sma_long:
+            trend = 'bearish'
+            log_info(f"{coin_pair} ({timeframe}): Tendência BEARISH - Preço < SMA{sma_short_period} < SMA{sma_long_period}")
+        else:
+            trend = 'neutral'
+            log_info(f"{coin_pair} ({timeframe}): Tendência NEUTRA")
+        
+        return trend
+        
+    except Exception as e:
+        log_error(f"Erro ao verificar tendência maior de {coin_pair}: {e}")
+        return 'neutral'
 
 def calculate_bollinger_bands(data, period=20, std_dev=2):
     """
@@ -340,6 +379,82 @@ def smart_exit_conditions(coin_pair, entry_price, current_price, time_held):
         return "SUPPORT_BREAK"
     
     return None
+
+def calculate_atr(data, period=14):
+    """
+    Calcula Average True Range - medida de volatilidade.
+    ATR é melhor que percentual fixo pois se adapta à volatilidade da moeda.
+    """
+    try:
+        if len(data) < period + 1:
+            log_error(f"Dados insuficientes para ATR. Necessário: {period+1}, Disponível: {len(data)}")
+            return None
+        
+        high = data['high']
+        low = data['low']
+        close = data['close']
+        
+        # True Range é o maior de:
+        # 1. High - Low
+        # 2. abs(High - Close anterior)
+        # 3. abs(Low - Close anterior)
+        tr1 = high - low
+        tr2 = abs(high - close.shift())
+        tr3 = abs(low - close.shift())
+        
+        # Pega o máximo dos três
+        frames = [tr1, tr2, tr3]
+        tr = pd.concat(frames, axis=1).max(axis=1)
+        
+        # ATR é a média móvel do True Range
+        atr = tr.rolling(window=period).mean()
+        
+        return atr.iloc[-1]
+        
+    except Exception as e:
+        log_error(f"Erro ao calcular ATR: {e}")
+        return None
+
+
+def dynamic_stop_loss_atr_based(coin_pair, atr_multiplier=2.0):
+    """
+    Calcula stop loss baseado em ATR em vez de percentual fixo.
+    Mais inteligente pois se adapta à volatilidade específica da moeda.
+    
+    Args:
+        coin_pair: Par de moedas
+        atr_multiplier: Multiplicador do ATR (2.0 = 2x o ATR)
+    
+    Returns:
+        float: Percentual de stop loss adaptativo
+    """
+    try:
+        df = get_historical_data(coin_pair)
+        if df.empty:
+            log_warning(f"Sem dados para calcular ATR de {coin_pair}, usando default")
+            return config.DEFAULT_STOP_LOSS_PCT
+        
+        current_price = df['close'].iloc[-1]
+        atr = calculate_atr(df, period=14)
+        
+        if atr is None or atr <= 0:
+            log_warning(f"ATR inválido para {coin_pair}, usando default")
+            return config.DEFAULT_STOP_LOSS_PCT
+        
+        # Stop loss = (ATR * multiplicador) / preço atual
+        # Exemplo: Se ATR = 0.05 e preço = 1.0, stop = 0.1 = 10%
+        stop_distance = (atr * atr_multiplier) / current_price
+        
+        # Limita entre 4% e 15% para segurança
+        stop_loss_pct = max(0.04, min(0.15, stop_distance))
+        
+        log_info(f"{coin_pair}: ATR={atr:.6f}, Stop Loss calculado={stop_loss_pct*100:.2f}%")
+        
+        return stop_loss_pct
+        
+    except Exception as e:
+        log_error(f"Erro ao calcular stop loss baseado em ATR: {e}")
+        return config.DEFAULT_STOP_LOSS_PCT
 
 
 def check_technical_indicators(coin_pair):

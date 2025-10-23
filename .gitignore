@@ -1,1 +1,7 @@
 .env
+.pyc
+*./analysis/__pycache__/
+*./api/__pycache__/
+*./config/__pycache__/
+*./strategy/__pycache__/
+
