@@ -9,6 +9,7 @@ from config import config
 from utils.helpers import log_info, log_error
 
 
+
 def is_llm_server_online():
     """
     Verifica se o servidor LLM local está online e respondendo.
@@ -43,7 +44,8 @@ def query_local_llm(messages, temperature=0.2, max_tokens=8192):
     """
     try:
         payload = {
-            "model": config.LLM_MODEL_NAME, 
+            "model": config.LLM_MODEL_NAME,
+            "reasoning": "High",
             "messages": messages,
             "temperature": temperature,
             "max_tokens": max_tokens,
@@ -157,7 +159,6 @@ def list_available_models():
     except Exception as e:
         log_error(f"Erro ao listar modelos: {e}")
         return None
-
 
 def diagnose_llm_server():
     """

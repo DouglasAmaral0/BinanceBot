@@ -6,16 +6,230 @@ from concurrent.futures import ThreadPoolExecutor
 
 from config import config
 from utils.helpers import log_info, log_error
-from api.binance_client import get_all_binance_coins, last_sold_coin, last_trade_time
 from api.data_collectors import collect_all_data_for_coin
 from analysis.technical import (
     calculate_rsi_for_coin,
     calculate_volatility_for_coin,
     calculate_ma_for_coin,
     calculate_macd_for_coin,
+    calculate_bollinger_bands   # NOVO
 )
 from analysis.sentiment import analyze_sentiment_with_llm, get_combined_sentiment_score
 
+from api.binance_client import (
+    get_all_binance_coins, 
+    last_sold_coin, 
+    last_trade_time,
+    get_24h_volume,          
+    get_average_volume,        
+    get_volume_ratio,  
+    get_volume_analysis,      
+    get_historical_data        
+)
+
+
+def filter_by_rsi_enhanced(coin_pair, rsi_buy_threshold=35, rsi_oversold=30):
+    """
+    Versão melhorada do filtro RSI com zonas dinâmicas e análise de volume.
+    """
+    # Calcula RSI
+    rsi = calculate_rsi_for_coin(coin_pair)
+    if rsi is None:
+        return None
+    
+    # Análise de volume usando as novas funções
+    volume_score = 0
+    volume_analysis = get_volume_analysis(coin_pair)  # Nova função que criamos
+    
+    if volume_analysis:
+        volume_score = volume_analysis.get('volume_score', 0)
+        volume_signal = volume_analysis.get('volume_signal', 'NEUTRO')
+        
+        # Log do sinal de volume
+        if volume_signal in ['FORTE_COMPRA', 'COMPRA']:
+            log_info(f"{coin_pair}: Sinal de volume positivo: {volume_signal}")
+    
+    # Calcula volatilidade
+    volatility = calculate_volatility_for_coin(coin_pair)
+    if volatility is None:
+        return None
+    
+    # Ajusta threshold baseado na volatilidade
+    if volatility > 0.03:  # Alta volatilidade (3%+)
+        rsi_buy_threshold = min(40, rsi_buy_threshold + 2)  # Mais tolerante
+        log_info(f"{coin_pair}: Alta volatilidade detectada, RSI threshold ajustado para {rsi_buy_threshold}")
+    
+    # Sistema de scoring melhorado
+    tech_score = 0
+    
+    # Score baseado em RSI (quanto menor, melhor para compra)
+    if rsi < rsi_oversold:
+        tech_score += 100  # Forte sinal de compra
+        log_info(f"{coin_pair}: RSI em zona de SOBREVENDA FORTE ({rsi:.2f})")
+    elif rsi < rsi_buy_threshold:
+        tech_score += 70
+    elif rsi < 50:
+        tech_score += 40
+    else:
+        log_info(f"{coin_pair}: RSI={rsi:.2f} (>{50}, não considerado)")
+        return None  # RSI muito alto, não considera
+    
+    # Adiciona score de volatilidade (volatilidade moderada é melhor)
+    if 0.01 < volatility < 0.05:  # Volatilidade ideal entre 1% e 5%
+        tech_score += volatility * 1500
+    elif volatility <= 0.01:  # Muito baixa
+        tech_score += volatility * 500
+    else:  # Muito alta (>5%)
+        tech_score += volatility * 800  # Penaliza um pouco
+    
+    # Adiciona score de volume
+    tech_score += volume_score * 0.5  # Volume tem peso de 50% do seu score
+    
+    # Médias móveis e MACD para complementar
+    sma_50 = calculate_ma_for_coin(coin_pair, period=50)
+    sma_200 = calculate_ma_for_coin(coin_pair, period=200)
+    macd_line, macd_signal, macd_histogram = calculate_macd_for_coin(coin_pair)
+    
+    # Bônus por tendência
+    trend_bonus = 0
+    if sma_50 and sma_200:
+        if sma_50 > sma_200:
+            trend_bonus += 15  # Golden cross
+            log_info(f"{coin_pair}: Golden Cross detectado (SMA50 > SMA200)")
+        else:
+            trend_bonus -= 10
+    
+    if macd_line and macd_signal:
+        if macd_line > macd_signal and macd_histogram > 0:
+            trend_bonus += 10
+            log_info(f"{coin_pair}: MACD positivo")
+        elif macd_histogram < 0:
+            trend_bonus -= 5
+    
+    tech_score += trend_bonus
+    
+    # Verificar Bollinger Bands se disponível
+    bb_data = calculate_bollinger_bands(get_historical_data(coin_pair))
+    bb_position_str = "n/a"
+    if bb_data:
+        bb_position = bb_data['position']
+        bb_position_str = f"{bb_position:.2f}"
+        if bb_position < 0.3:  # Próximo da banda inferior
+            tech_score += 20
+            log_info(f"{coin_pair}: Próximo da Bollinger Band inferior (posição: {bb_position:.2f})")
+    
+    # Preparar dados para retorno
+    tech_data = {
+        'pair': coin_pair,
+        'coin': coin_pair.replace('USDT', ''),
+        'rsi': rsi,
+        'volatility': volatility,
+        'sma_50': sma_50,
+        'sma_200': sma_200,
+        'macd': macd_line,
+        'macd_signal': macd_signal,
+        'volume_score': volume_score,
+        'volume_signal': volume_analysis.get('volume_signal', 'DESCONHECIDO') if volume_analysis else 'ERRO',
+        'bb_position': bb_data['position'] if bb_data else None,
+        'tech_score': tech_score
+    }
+    
+    # Log resumido
+    sma_50_str = f"{sma_50:.4f}" if sma_50 is not None else "n/a"
+    sma_200_str = f"{sma_200:.4f}" if sma_200 is not None else "n/a"
+    macd_str = f"{macd_line:.4f}" if macd_line is not None else "n/a"
+    
+    log_info(
+        f"{coin_pair}: RSI={rsi:.2f}, Vol={volatility*100:.2f}%, "
+        f"Volume Score={volume_score:.0f}, BB Pos={bb_position_str}, "
+        f"SMA50={sma_50_str}, SMA200={sma_200_str}, MACD={macd_str}, "
+        f"Score Final={tech_score:.2f}"
+    )
+    
+    return tech_data
+
+
+# === NOVO: Sistema de Scoring Multicritério ===
+
+def calculate_comprehensive_score(coin_pair):
+    """
+    Sistema de scoring que combina múltiplos indicadores.
+    """
+    score_components = {}
+    total_score = 0
+    
+    # 1. RSI Score (peso: 25%)
+    rsi = calculate_rsi_for_coin(coin_pair)
+    if rsi:
+        if rsi < 30:
+            score_components['rsi'] = 100
+        elif rsi < 40:
+            score_components['rsi'] = 70
+        elif rsi < 50:
+            score_components['rsi'] = 40
+        else:
+            score_components['rsi'] = 0
+    
+    # 2. MACD Score (peso: 20%)
+    macd_line, signal_line, histogram = calculate_macd_for_coin(coin_pair)
+    if macd_line and signal_line:
+        if histogram > 0 and macd_line > signal_line:
+            score_components['macd'] = 80
+        elif macd_line > signal_line:
+            score_components['macd'] = 60
+        else:
+            score_components['macd'] = 20
+    
+    # 3. Volume Score (peso: 15%)
+    volume_ratio = get_volume_ratio(coin_pair)  # Volume atual vs média
+    if volume_ratio:
+        if volume_ratio > 2.0:
+            score_components['volume'] = 100
+        elif volume_ratio > 1.5:
+            score_components['volume'] = 70
+        elif volume_ratio > 1.0:
+            score_components['volume'] = 40
+        else:
+            score_components['volume'] = 20
+    
+    # 4. Bollinger Bands Score (peso: 15%)
+    bb_position = calculate_bollinger_position(coin_pair)
+    if bb_position:
+        if bb_position < 0.2:  # Próximo da banda inferior
+            score_components['bollinger'] = 90
+        elif bb_position < 0.4:
+            score_components['bollinger'] = 60
+        else:
+            score_components['bollinger'] = 30
+    
+    # 5. Support/Resistance Score (peso: 15%)
+    sr_score = analyze_support_resistance(coin_pair)
+    if sr_score:
+        score_components['support'] = sr_score
+    
+    # 6. Momentum Score (peso: 10%)
+    momentum = calculate_momentum(coin_pair, period=10)
+    if momentum:
+        if momentum > 0:
+            score_components['momentum'] = 70
+        else:
+            score_components['momentum'] = 30
+    
+    # Calcular score ponderado
+    weights = {
+        'rsi': 0.25,
+        'macd': 0.20,
+        'volume': 0.15,
+        'bollinger': 0.15,
+        'support': 0.15,
+        'momentum': 0.10
+    }
+    
+    for component, value in score_components.items():
+        if component in weights:
+            total_score += value * weights[component]
+    
+    return total_score, score_components
 
 def filter_by_rsi(coin_pair, max_rsi=50):
     """
@@ -73,9 +287,14 @@ def filter_by_rsi(coin_pair, max_rsi=50):
         'tech_score': tech_score
     }
     
+    sma_50_str = f"{sma_50:.4f}" if sma_50 is not None else "n/a"
+    sma_200_str = f"{sma_200:.4f}" if sma_200 is not None else "n/a"
+    macd_str = f"{macd_line:.4f}" if macd_line is not None else "n/a"
+
+    
     log_info(
-        f"{coin_pair}: RSI={rsi:.2f}, Vol={vol*100:.2f}%, SMA50={sma_50:.4f if sma_50 else 'n/a'}, "
-        f"SMA200={sma_200:.4f if sma_200 else 'n/a'}, MACD={macd_line:.4f if macd_line else 'n/a'}, "
+        f"{coin_pair}: RSI={rsi:.2f}, Vol={vol*100:.2f}%, "
+        f"SMA50={sma_50_str}, SMA200={sma_200_str}, MACD={macd_str}, "
         f"Tech Score={tech_score:.2f}"
     )
     return tech_data
@@ -209,7 +428,7 @@ def choose_best_coin():
             continue
 
         # Filtra por RSI
-        tech_data = filter_by_rsi(pair)
+        tech_data = filter_by_rsi_enhanced(pair)
         if tech_data:
             rsi_candidates.append(tech_data)
     

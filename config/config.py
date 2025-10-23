@@ -21,20 +21,27 @@ class Config:
     DEFAULT_TAKE_PROFIT_PCT: float = 0.10
     COOLDOWN_TIME: int = 3600  # segundos
     MIN_USDT_FOR_TRADE: float = 10.0
-    PERCENT_USDT_TO_INVEST_PER_TRADE: float = 0.95
+    PERCENT_USDT_TO_INVEST_PER_TRADE: float = 1.0
     # Percentual do valor total do portfólio utilizado em cada operação
-    PERCENT_PORTFOLIO_PER_TRADE: float = 0.10
+    PERCENT_PORTFOLIO_PER_TRADE: float = 1.0
     # Perda máxima permitida por dia em USDT antes de pausar as operações
-    MAX_DAILY_LOSS_USDT: float = 50.0
-    MAX_COINS_TO_ANALYZE: int = 20
+    MAX_DAILY_LOSS_USDT: float = 100
+    MAX_COINS_TO_ANALYZE: int = 60
+    POSITION_MAX_HOLD_TIME = 42400  # 6 horas
+    POSITION_FORCE_SELL_TIME = 86400  # 12 horas
+    TRAILING_STOP_DISTANCE = 0.04    # 1.5%
+    RSI_BUY_THRESHOLD = 52         # Mais agressivo
+    DEFAULT_STOP_LOSS_PCT = 0.06        # 3% para volatilidade
+    DEFAULT_TAKE_PROFIT_PCT = 0.075     # 5% target rápido
+    USE_TRAILING_STOP = True
 
     # Configurações de LLM
-    LLM_MODEL_NAME: str = "local-llm"
-    LLM_SERVER_URL: str = "http://localhost:8000"
-    LLM_SERVER_TIMEOUT: int = 10
-    LLM_RESPONSE_WAIT: int = 30
+    LLM_MODEL_NAME: str = "openai/gpt-oss-20b"
+    LLM_SERVER_URL: str = "http://192.168.1.164:7800"
+    LLM_SERVER_TIMEOUT: int = 10000
+    LLM_RESPONSE_WAIT: int = 3000
     LLM_REQUEST_RETRIES: int = 3
-    LLM_PROMPT_MAX_LENGTH: int = 4000
+    LLM_PROMPT_MAX_LENGTH: int = 16000
     USE_OPENAI_FALLBACK: bool = False
 
     # Chaves de serviços externos
@@ -49,7 +56,7 @@ class Config:
     TWITTER_ACCESS_SECRET: str = os.getenv("TWITTER_ACCESS_SECRET", "")
 
     # Configurações de análise de sentimento
-    SENTIMENT_CACHE_DURATION: int = 3600
+    SENTIMENT_CACHE_DURATION: int = 36000
 
 # Instância padrão
 config = Config()

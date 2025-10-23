@@ -6,7 +6,8 @@ from binance.exceptions import BinanceAPIException, BinanceRequestException
 import pandas as pd
 import numpy as np
 import time
-import math # Adicionado
+import math 
+import json
 
 from config import config
 from utils.helpers import log_info, log_error, log_trade, log_warning, _determine_precision_from_string # Adicionado log_warning e _determine_precision_from_string
@@ -30,6 +31,9 @@ def initialize_client():
     except Exception as e:
         log_error(f"Falha ao conectar com a Binance ao inicializar cliente: {e}")
         raise # Re-lança a exceção para que a inicialização do bot falhe
+    return client
+
+def get_client():
     return client
 
 
@@ -96,6 +100,31 @@ def get_all_binance_coins():
         log_warning(f"Usando lista de moedas padrão devido a erro: {default_coins}")
         return default_coins
 
+def get_all_balances():
+    """
+    Obtém todos os saldos não-zero da conta.
+    
+    Returns:
+        dict: Dicionário com saldos {símbolo: quantidade}
+    """
+    try:
+        client = get_client()
+        account = client.get_account()
+        
+        balances = {}
+        for balance in account['balances']:
+            free = float(balance['free'])
+            locked = float(balance['locked'])
+            total = free + locked
+            
+            # Ignora saldos muito pequenos (poeira)
+            if total > 0.00001:
+                balances[balance['asset']] = total
+        
+        return balances
+    except Exception as e:
+        log_error(f"Erro ao obter todos os saldos: {e}")
+        return {}
 
 def get_historical_data(coin_pair, interval=Client.KLINE_INTERVAL_1HOUR, lookback="3 days ago UTC"): # Lookback aumentado
     """
@@ -529,3 +558,212 @@ def sell_all_coins():
     else:
         log_info("Nenhuma moeda foi vendida durante sell_all_coins.")
     return usdt_obtained_gross
+
+# Adicionar estas funções em api/binance_client.py
+
+def get_24h_ticker(symbol):
+    """
+    Obtém dados de ticker das últimas 24h incluindo volume.
+    
+    Args:
+        symbol (str): Par de trading (ex: 'BTCUSDT')
+        
+    Returns:
+        dict: Dados do ticker ou None em caso de erro
+    """
+    try:
+        ticker = client.get_ticker(symbol=symbol)
+        return ticker
+    except Exception as e:
+        log_error(f"Erro ao obter ticker 24h para {symbol}: {e}")
+        return None
+
+
+def get_24h_volume(symbol):
+    """
+    Obtém o volume de trading das últimas 24 horas.
+    
+    Args:
+        symbol (str): Par de trading (ex: 'BTCUSDT')
+        
+    Returns:
+        float: Volume em USDT ou None em caso de erro
+    """
+    try:
+        ticker = get_24h_ticker(symbol)
+        if ticker:
+            # Volume em quote asset (USDT)
+            volume_usdt = float(ticker.get('quoteVolume', 0))
+            log_info(f"Volume 24h para {symbol}: {volume_usdt:,.2f} USDT")
+            return volume_usdt
+        return None
+    except Exception as e:
+        log_error(f"Erro ao obter volume 24h para {symbol}: {e}")
+        return None
+
+
+def get_average_volume(symbol, days=7, interval='1d'):
+    """
+    Calcula o volume médio dos últimos X dias.
+    
+    Args:
+        symbol (str): Par de trading (ex: 'BTCUSDT')
+        days (int): Número de dias para calcular a média
+        interval (str): Intervalo dos candles ('1d' para diário)
+        
+    Returns:
+        float: Volume médio em USDT ou None em caso de erro
+    """
+    try:
+        # Busca dados históricos
+        klines = client.get_historical_klines(
+            symbol, 
+            interval,
+            f"{days + 1} days ago UTC"
+        )
+        
+        if not klines:
+            log_error(f"Sem dados históricos de volume para {symbol}")
+            return None
+        
+        # Extrai volumes (índice 7 é o volume em quote asset)
+        volumes = [float(k[7]) for k in klines[:-1]]  # Remove o dia atual incompleto
+        
+        if volumes:
+            avg_volume = sum(volumes) / len(volumes)
+            log_info(f"Volume médio {days}d para {symbol}: {avg_volume:,.2f} USDT")
+            return avg_volume
+        
+        return None
+    except Exception as e:
+        log_error(f"Erro ao calcular volume médio para {symbol}: {e}")
+        return None
+
+
+def get_volume_ratio(symbol, days=7):
+    """
+    Calcula a razão entre o volume atual e o volume médio.
+    
+    Args:
+        symbol (str): Par de trading (ex: 'BTCUSDT')
+        days (int): Dias para calcular a média
+        
+    Returns:
+        float: Razão volume_atual/volume_médio ou None
+    """
+    try:
+        current_volume = get_24h_volume(symbol)
+        avg_volume = get_average_volume(symbol, days)
+        
+        if current_volume and avg_volume and avg_volume > 0:
+            ratio = current_volume / avg_volume
+            
+            # Log informativo sobre o volume
+            if ratio > 2.0:
+                log_info(f">>> VOLUME ALTO: {symbol} com {ratio:.2f}x a média ({days}d)")
+            elif ratio > 1.5:
+                log_info(f"Volume elevado: {symbol} com {ratio:.2f}x a média")
+            elif ratio < 0.5:
+                log_info(f"Volume baixo: {symbol} com {ratio:.2f}x a média")
+            
+            return ratio
+        
+        return None
+    except Exception as e:
+        log_error(f"Erro ao calcular ratio de volume para {symbol}: {e}")
+        return None
+
+
+def get_volume_analysis(symbol):
+    """
+    Análise completa de volume para um símbolo.
+    
+    Args:
+        symbol (str): Par de trading (ex: 'BTCUSDT')
+        
+    Returns:
+        dict: Análise completa de volume
+    """
+    try:
+        ticker = get_24h_ticker(symbol)
+        if not ticker:
+            return None
+        
+        # Volume 24h
+        volume_24h = float(ticker.get('quoteVolume', 0))
+        
+        # Variação de preço 24h
+        price_change_percent = float(ticker.get('priceChangePercent', 0))
+        
+        # Volume médio 7 dias
+        avg_volume_7d = get_average_volume(symbol, 7)
+        
+        # Volume médio 3 dias (mais recente)
+        avg_volume_3d = get_average_volume(symbol, 3)
+        
+        # Análise
+        analysis = {
+            'volume_24h': volume_24h,
+            'avg_volume_7d': avg_volume_7d,
+            'avg_volume_3d': avg_volume_3d,
+            'price_change_24h': price_change_percent,
+            'volume_score': 0
+        }
+        
+        # Calcula score de volume
+        if avg_volume_7d and avg_volume_7d > 0:
+            ratio_7d = volume_24h / avg_volume_7d
+            
+            # Score baseado no ratio e direção do preço
+            if ratio_7d > 2.0 and price_change_percent > 0:
+                analysis['volume_score'] = 100  # Volume alto com preço subindo = muito bom
+                analysis['volume_signal'] = 'FORTE_COMPRA'
+            elif ratio_7d > 1.5:
+                analysis['volume_score'] = 70
+                analysis['volume_signal'] = 'COMPRA'
+            elif ratio_7d > 1.0:
+                analysis['volume_score'] = 50
+                analysis['volume_signal'] = 'NEUTRO'
+            else:
+                analysis['volume_score'] = 30
+                analysis['volume_signal'] = 'FRACO'
+            
+            analysis['volume_ratio_7d'] = ratio_7d
+        
+        # Tendência de volume (3d vs 7d)
+        if avg_volume_3d and avg_volume_7d and avg_volume_7d > 0:
+            trend_ratio = avg_volume_3d / avg_volume_7d
+            if trend_ratio > 1.2:
+                analysis['volume_trend'] = 'CRESCENTE'
+            elif trend_ratio < 0.8:
+                analysis['volume_trend'] = 'DECRESCENTE'
+            else:
+                analysis['volume_trend'] = 'ESTÁVEL'
+        
+        return analysis
+        
+    except Exception as e:
+        log_error(f"Erro na análise de volume para {symbol}: {e}")
+        return None
+
+
+def check_volume_breakout(symbol, threshold=2.0):
+    """
+    Verifica se há um breakout de volume.
+    
+    Args:
+        symbol (str): Par de trading
+        threshold (float): Multiplicador para considerar breakout
+        
+    Returns:
+        bool: True se houver breakout de volume
+    """
+    try:
+        ratio = get_volume_ratio(symbol)
+        if ratio and ratio > threshold:
+            log_info(f">>> BREAKOUT DE VOLUME detectado em {symbol}: {ratio:.2f}x a média!")
+            return True
+        return False
+    except Exception as e:
+        log_error(f"Erro ao verificar breakout de volume: {e}")
+        return False

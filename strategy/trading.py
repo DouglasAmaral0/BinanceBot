@@ -2,6 +2,7 @@
 Implementação das estratégias e lógica de trading
 """
 from config import config
+import os
 from utils.helpers import (
     log_info,
     log_error,
@@ -10,9 +11,11 @@ from utils.helpers import (
     log_performance,
 )
 from datetime import datetime
-from api.binance_client import get_current_price, get_balance, buy_coin, sell_all_coins, get_portfolio_value # Adicionado get_portfolio_value
+from api.binance_client import get_current_price, get_balance, buy_coin, sell_all_coins, get_portfolio_value, sell_coin, get_all_balances
 from analysis.technical import dynamic_stop_loss_take_profit
 from strategy.selection import choose_best_coin
+import json
+import time
 
 # Variáveis globais para o estado da negociação
 current_coin = None  # Par de moedas atual (ex: 'BTCUSDT')
@@ -20,6 +23,8 @@ current_coin_base_asset = None # Ex: 'BTC'
 current_coin_purchase_price = 0.0  # Preço de compra REAL da moeda atual
 current_coin_quantity_bought = 0.0 # Quantidade REAL comprada
 current_coin_total_cost_usdt = 0.0 # Custo total em USDT incluindo taxas da compra
+position_open_time = None          # Timestamp de quando a posição foi aberta
+highest_price_reached = 0.0 
 
 stop_loss_pct = config.DEFAULT_STOP_LOSS_PCT
 take_profit_pct = config.DEFAULT_TAKE_PROFIT_PCT
@@ -30,6 +35,47 @@ usdt_balance_before_trade = 0.0
 # Controle de performance diária
 daily_profit_loss = 0.0
 current_day = datetime.utcnow().date()
+
+def save_bot_state():
+    """
+    Salva o estado atual do bot em um arquivo JSON.
+    Chame esta função após cada ciclo de trading.
+    """
+    try:
+        
+        # Obtém informações globais se disponíveis
+        global current_coin, current_coin_purchase_price, stop_loss_pct, take_profit_pct
+        
+        state = {
+            'total_usdt': get_portfolio_value(),
+            'balances': get_all_balances(),
+            'last_update': datetime.now().isoformat(),
+            'trading_info': {
+                'current_coin': current_coin if 'current_coin' in globals() else None,
+                'purchase_price': current_coin_purchase_price if 'current_coin_purchase_price' in globals() else 0,
+                'stop_loss': stop_loss_pct if 'stop_loss_pct' in globals() else config.DEFAULT_STOP_LOSS_PCT,
+                'take_profit': take_profit_pct if 'take_profit_pct' in globals() else config.DEFAULT_TAKE_PROFIT_PCT
+            },
+            'bot_config': {
+                'interval_minutes': config.DEFAULT_INTERVAL,
+                'max_coins_to_analyze': config.MAX_COINS_TO_ANALYZE,
+                'percent_portfolio_per_trade': config.PERCENT_PORTFOLIO_PER_TRADE
+            }
+        }
+
+        state_dir = '/home/pi/crypto_bot'
+        if not os.path.exists(state_dir):
+            os.makedirs(state_dir)
+        
+        filepath = os.path.join(state_dir, 'bot_state.json')
+        
+        with open(filepath, 'w') as f:
+            json.dump(state, f, indent=2)
+        
+        log_info(f"Estado do bot salvo em {filepath}")
+        
+    except Exception as e:
+        log_error(f"Erro ao salvar estado do bot: {e}")
 
 
 def _calculate_order_details(order_response, default_fee_percent=config.BINANCE_FEE_PERCENT):
@@ -220,6 +266,7 @@ def initialize_trade(coin_pair_to_buy):
             
             log_info("Valor da carteira APÓS a compra:")
             get_portfolio_value() # Log do portfólio após a compra
+            save_bot_state() 
             return True
         else:
             log_error(f"Falha ao processar detalhes da ordem de compra para {coin_pair_to_buy}. Resposta da ordem: {buy_order_response}")
@@ -227,6 +274,200 @@ def initialize_trade(coin_pair_to_buy):
     else:
         log_error(f"Falha na execução da ordem de compra para {coin_pair_to_buy}.")
         return False
+    
+def check_position_timeout(coin_pair_to_check):
+    """
+    Verifica se a posição excedeu o tempo máximo de holding.
+    
+    Args:
+        coin_pair_to_check (str): Par de moedas atual
+        
+    Returns:
+        str or None: "TIMEOUT_SOFT", "TIMEOUT_HARD" se acionado, ou None
+    """
+    global position_open_time, current_coin_purchase_price
+    
+    if position_open_time is None:
+        return None
+    
+    time_held = time.time() - position_open_time
+    hours_held = time_held / 3600
+    
+    # Obter preço atual
+    current_price = get_current_price(coin_pair_to_check)
+    if current_price is None:
+        return None
+    
+    # Calcular P&L atual
+    pnl_percentage = ((current_price - current_coin_purchase_price) / current_coin_purchase_price) * 100
+    
+    log_info(f"Posição aberta há {hours_held:.1f} horas. P&L atual: {pnl_percentage:.2f}%")
+    
+    # Timeout suave - vende se estiver em lucro após X horas
+    if time_held >= config.POSITION_MAX_HOLD_TIME:
+        if pnl_percentage > 0:
+            log_info(f"!!! TIMEOUT SUAVE ATIVADO - Vendendo com lucro de {pnl_percentage:.2f}% após {hours_held:.1f}h !!!")
+            return "TIMEOUT_SOFT"
+        else:
+            log_info(f"Timeout suave atingido mas posição em prejuízo ({pnl_percentage:.2f}%). Aguardando...")
+    
+    # Timeout forçado - vende independentemente após Y horas
+    if time_held >= config.POSITION_FORCE_SELL_TIME:
+        log_info(f"!!! TIMEOUT FORÇADO - Vendendo após {hours_held:.1f}h com P&L de {pnl_percentage:.2f}% !!!")
+        return "TIMEOUT_HARD"
+    
+    return None
+
+
+# Adicionar trailing stop
+def update_trailing_stop():
+    """
+    Atualiza o stop loss dinamicamente baseado no preço máximo atingido.
+    """
+    global stop_loss_pct, current_coin, current_coin_purchase_price, highest_price_reached
+    
+    if not config.USE_TRAILING_STOP or current_coin is None:
+        return
+    
+    current_price = get_current_price(current_coin)
+    if current_price is None:
+        return
+    
+    # Inicializa o preço máximo se ainda não existir
+    if 'highest_price_reached' not in globals():
+        globals()['highest_price_reached'] = current_coin_purchase_price
+    
+    # Atualiza o preço máximo
+    if current_price > highest_price_reached:
+        old_highest = highest_price_reached
+        highest_price_reached = current_price
+        
+        # Calcula novo stop loss (X% abaixo do máximo)
+        new_stop_price = highest_price_reached * (1 - config.TRAILING_STOP_DISTANCE)
+        
+        # Só atualiza se o novo stop for maior que o anterior
+        if new_stop_price > current_coin_purchase_price * (1 - stop_loss_pct):
+            old_stop_pct = stop_loss_pct
+            stop_loss_pct = 1 - (new_stop_price / current_coin_purchase_price)
+            
+            log_info(f"📈 Trailing Stop Atualizado!")
+            log_info(f"   Novo máximo: {highest_price_reached:.6f} (anterior: {old_highest:.6f})")
+            log_info(f"   Stop Loss: {old_stop_pct*100:.2f}% → {stop_loss_pct*100:.2f}%")
+            log_info(f"   Stop ativará em: {new_stop_price:.6f}")
+
+
+# Modificar a função initialize_trade para registrar o tempo
+def initialize_trade_with_timeout(coin_pair_to_buy):
+    """
+    Versão modificada de initialize_trade que registra o tempo de abertura.
+    """
+    global position_open_time, highest_price_reached
+    
+    # Chama a função original (você pode integrar diretamente)
+    result = initialize_trade(coin_pair_to_buy)
+    
+    if result:
+        position_open_time = time.time()
+        highest_price_reached = current_coin_purchase_price
+        log_info(f"⏰ Timer de posição iniciado. Timeout suave em {config.POSITION_MAX_HOLD_TIME/3600:.1f}h, forçado em {config.POSITION_FORCE_SELL_TIME/3600:.1f}h")
+    
+    return result
+
+def execute_strategy_enhanced():
+    """
+    Versão aprimorada de execute_strategy com timeout e trailing stop.
+    """
+    global current_coin, current_coin_base_asset, current_coin_purchase_price, current_coin_quantity_bought, current_coin_total_cost_usdt
+    global usdt_balance_before_trade, position_open_time, highest_price_reached
+
+    
+    if check_daily_loss_limit():
+        return False
+    
+    action_taken = False
+    
+    if not current_coin:
+        log_info("Não há moeda atual. Buscando a melhor oportunidade...")
+        chosen_coin_pair = choose_best_coin()
+        
+        if chosen_coin_pair:
+            if initialize_trade_with_timeout(chosen_coin_pair):
+                action_taken = True
+        else:
+            log_info("Nenhuma moeda adequada encontrada para compra neste momento.")
+    else:
+        # Atualiza trailing stop se ativado
+        update_trailing_stop()
+        
+        # Verifica timeout PRIMEIRO (tem prioridade sobre stop loss/take profit)
+        timeout_trigger = check_position_timeout(current_coin)
+        
+        if timeout_trigger:
+            trigger_reason = timeout_trigger
+        else:
+            # Verifica stop loss e take profit normalmente
+            trigger_reason = check_stop_loss_and_take_profit(current_coin)
+        
+        if trigger_reason:
+            log_info(f"💰 Decisão de vender {current_coin} devido a: {trigger_reason}")
+            
+            # Executa a venda (código existente)
+            quantity_to_sell = get_balance(current_coin_base_asset)
+            if quantity_to_sell == 0 and current_coin_quantity_bought > 0:
+                quantity_to_sell = current_coin_quantity_bought
+            
+            if quantity_to_sell > 0:
+                sell_order_response = sell_coin(current_coin, quantity_to_sell)
+                
+                if sell_order_response:
+                    avg_sell_price, total_qty_sold, gross_usdt_received, fees_paid_usdt_sell = _calculate_order_details(sell_order_response)
+                    net_usdt_received = gross_usdt_received - fees_paid_usdt_sell
+
+                    log_trade("SELL", current_coin, total_qty_sold, avg_sell_price, 
+                              gross_usdt_received, fees_paid_usdt_sell, net_usdt_received)
+
+                    # Calcular P&L do Trade
+                    # Custo da compra já inclui taxas (current_coin_total_cost_usdt)
+                    # Receita da venda já é líquida (net_usdt_received)
+                    
+                    # P&L baseado no custo da moeda comprada e receita da venda
+                    profit_or_loss_coin_trade = net_usdt_received - current_coin_total_cost_usdt
+                    
+                    # P&L baseado na variação do saldo total de USDT (mais abrangente)
+                    usdt_balance_after_trade = get_balance('USDT')
+                    profit_or_loss_usdt_balance = usdt_balance_after_trade - usdt_balance_before_trade
+                    
+                    log_info(f"\n--- RESULTADO DO TRADE PARA {current_coin} ---")
+                    log_info(f"Custo Total da Compra (c/ taxas): {current_coin_total_cost_usdt:.2f} USDT")
+                    log_info(f"Receita Líquida da Venda (c/ taxas): {net_usdt_received:.2f} USDT")
+                    log_info(f"Lucro/Prejuízo (Moeda Específica): {profit_or_loss_coin_trade:.2f} USDT")
+                    log_info(f"----------------------------------------------")
+                    log_info(f"Saldo USDT (Antes da Compra): {usdt_balance_before_trade:.2f} USDT")
+                    log_info(f"Saldo USDT (Após a Venda): {usdt_balance_after_trade:.2f} USDT")
+                    log_info(f"Lucro/Prejuízo (Variação Saldo USDT): {profit_or_loss_usdt_balance:.2f} USDT")
+                    update_daily_profit(profit_or_loss_usdt_balance)
+                    log_info(f"--- FIM DO RESULTADO DO TRADE ---\n")
+
+                    # Resetar estado para a próxima trade
+                    current_coin = None
+                    current_coin_base_asset = None
+                    current_coin_purchase_price = 0.0
+                    current_coin_quantity_bought = 0.0
+                    current_coin_total_cost_usdt = 0.0
+                    usdt_balance_before_trade = 0.0 # Reset
+                    action_taken = True
+                    position_open_time = None
+                    highest_price_reached = 0
+                    log_info("Moeda vendida! Pronto para selecionar nova moeda na próxima execução.")
+                    log_info("Valor da carteira APÓS a venda:")
+                    get_portfolio_value()
+                    save_bot_state()
+
+                else:
+                    log_error(f"Falha ao executar ordem de venda para {current_coin}. Mantendo posição.")
+               
+    
+    return action_taken
 
 
 def execute_strategy():
@@ -323,6 +564,7 @@ def execute_strategy():
                     log_info("Moeda vendida! Pronto para selecionar nova moeda na próxima execução.")
                     log_info("Valor da carteira APÓS a venda:")
                     get_portfolio_value()
+                    save_bot_state()
                 else:
                     log_error(f"Falha ao executar ordem de venda para {current_coin}. Mantendo posição.")
             else:

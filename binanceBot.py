@@ -22,7 +22,7 @@ from api.binance_client import initialize_client, get_portfolio_value, sell_all_
 from api.data_collectors import init_collectors
 from llm.client import diagnose_llm_server
 from analysis.sentiment import clear_sentiment_cache
-from strategy.trading import execute_strategy
+from strategy.trading import execute_strategy_enhanced, save_bot_state
 
 
 def initialize_bot():
@@ -98,7 +98,8 @@ def main(interval=None):
     if not initialize_bot():
         log_error("Falha na inicialização. Encerrando...")
         return
-    
+     
+    save_bot_state()
     # Contador para controle de análises completas de sentimento
     cycle_counter = 0
     
@@ -110,7 +111,8 @@ def main(interval=None):
             
             # Executa a estratégia
             try:
-                execute_strategy()
+                execute_strategy_enhanced()
+                save_bot_state() 
             except Exception as e:
                 log_error(f"Erro ao executar estratégia: {e}")
             
@@ -127,11 +129,14 @@ def main(interval=None):
     
     except KeyboardInterrupt:
         log_info("\n==== BOT INTERROMPIDO PELO USUÁRIO ====")
+        save_bot_state() 
     except Exception as e:
+        save_bot_state() 
         log_error(f"\n==== ERRO FATAL: {e} ====")
     finally:
         log_info("\n==== ENCERRANDO BOT DE TRADING ====")
         log_info("Portfolio final:")
+        save_bot_state() 
         get_portfolio_value()
 
 

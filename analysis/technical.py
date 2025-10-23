@@ -233,6 +233,114 @@ def dynamic_stop_loss_take_profit(coin_pair, base_stop_loss=0.05, base_take_prof
     
     return new_stop_loss, new_take_profit
 
+def calculate_bollinger_bands(data, period=20, std_dev=2):
+    """
+    Calcula Bandas de Bollinger.
+    """
+    sma = data['close'].rolling(window=period).mean()
+    std = data['close'].rolling(window=period).std()
+    
+    upper_band = sma + (std * std_dev)
+    lower_band = sma - (std * std_dev)
+    
+    current_price = data['close'].iloc[-1]
+    
+    # Posição relativa (0 = banda inferior, 1 = banda superior)
+    position = (current_price - lower_band.iloc[-1]) / (upper_band.iloc[-1] - lower_band.iloc[-1])
+    
+    return {
+        'upper': upper_band.iloc[-1],
+        'middle': sma.iloc[-1],
+        'lower': lower_band.iloc[-1],
+        'position': position,
+        'current_price': current_price
+    }
+
+
+def detect_support_resistance(data, window=20):
+    """
+    Detecta níveis de suporte e resistência.
+    """
+    highs = data['high'].rolling(window=window).max()
+    lows = data['low'].rolling(window=window).min()
+    
+    current_price = data['close'].iloc[-1]
+    
+    # Encontra suporte mais próximo
+    recent_lows = lows.tail(window).unique()
+    support = max([l for l in recent_lows if l < current_price], default=0)
+    
+    # Encontra resistência mais próxima  
+    recent_highs = highs.tail(window).unique()
+    resistance = min([h for h in recent_highs if h > current_price], default=float('inf'))
+    
+    # Score baseado na proximidade do suporte
+    if support > 0:
+        distance_from_support = (current_price - support) / current_price
+        if distance_from_support < 0.02:  # Muito próximo do suporte
+            return 90
+        elif distance_from_support < 0.05:
+            return 70
+        else:
+            return 50
+    return 40
+
+
+def calculate_volume_profile(coin_pair, periods=24):
+    """
+    Analisa o perfil de volume.
+    """
+    data = get_historical_data(coin_pair, interval='1h', limit=periods*2)
+    if data.empty:
+        return None
+    
+    recent_volume = data['volume'].tail(periods).mean()
+    previous_volume = data['volume'].head(periods).mean()
+    
+    # Ratio de volume (recente vs anterior)
+    volume_ratio = recent_volume / previous_volume if previous_volume > 0 else 1
+    
+    # Detecta aumento súbito de volume
+    last_3_hours = data['volume'].tail(3).mean()
+    avg_volume = data['volume'].mean()
+    
+    volume_spike = last_3_hours / avg_volume if avg_volume > 0 else 1
+    
+    return {
+        'ratio': volume_ratio,
+        'spike': volume_spike,
+        'is_increasing': volume_ratio > 1.2,
+        'has_spike': volume_spike > 2.0
+    }
+def smart_exit_conditions(coin_pair, entry_price, current_price, time_held):
+    """
+    Condições de saída mais inteligentes baseadas em múltiplos fatores.
+    """
+    pnl = (current_price - entry_price) / entry_price
+    
+    # Condições de saída rápida (scalping)
+    if time_held < 3600:  # Menos de 1 hora
+        if pnl > 0.015:  # 1.5% de lucro rápido
+            return "QUICK_PROFIT"
+    
+    # Saída por reversão de indicadores
+    rsi = calculate_rsi_for_coin(coin_pair)
+    if rsi and rsi > 70 and pnl > 0:
+        return "RSI_OVERBOUGHT"
+    
+    # Saída por perda de momentum
+    macd_line, signal_line, _ = calculate_macd_for_coin(coin_pair)
+    if macd_line and signal_line:
+        if macd_line < signal_line and pnl > 0.005:
+            return "MOMENTUM_LOSS"
+    
+    # Saída por quebra de suporte
+    bb_data = calculate_bollinger_bands(get_historical_data(coin_pair))
+    if bb_data and current_price < bb_data['middle'] and pnl < -0.02:
+        return "SUPPORT_BREAK"
+    
+    return None
+
 
 def check_technical_indicators(coin_pair):
     """
